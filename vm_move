@@ -1,0 +1,176 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-#
+# @(#)vm_move
+
+ANSIBLE_METADATA = {
+    'metadata_version': '1.1',
+    'status': ['preview'],
+    'supported_by': 'AMCS'
+}
+
+DOCUMENTATION = '''
+---
+module: vm_move
+
+short_description: Moves VM to a different datastore on the same vHost
+
+version_added: 2.3
+
+description:
+  - "This module moves a VM within a vCenter infrastructure to a different datastore within the same vHost. For example, from an NFS to a local storage or the other way around."
+
+options:
+  vc_host:
+    description: vCenter Server hostname or IP address
+    required: true
+  vc_user:
+    description: vCenter Server username
+    required: true
+  vc_pass:
+    description: vCenter Server password
+    required: true
+  vm_name:
+    description: Name of a VM which should be moved to a different datastore
+    required: true
+  ds_name:
+    description: Name of a new datastore
+    required: false
+  esx_host:
+    description: Name of a new ESX host
+    required: false
+
+author:
+  - Nikita Kazantsev
+  - Reubenur Rahman
+  - Martin Schurz
+'''
+
+EXAMPLES = '''
+- name: Moving VM to a different datastore
+  vm_move:
+    vc_host: vcenter.local
+    vc_user: admin
+    vc_pass: verySecret
+    vm_name: test-vm-001
+    ds_name: better-datastore-001
+'''
+
+import atexit
+import sys
+import time
+
+from pyVmomi import vim, vmodl
+from pyVim import connect
+from pyVim.connect import Disconnect
+from ansible.module_utils.basic import *
+
+def get_obj(content, vimtype, name):
+    """
+    Get the vsphere object associated with a given text name
+    """
+    obj = None
+    container = content.viewManager.CreateContainerView(content.rootFolder, vimtype, True)
+    for c in container.view:
+        if c.name == name:
+            obj = c
+            break
+    return obj
+
+
+def wait_for_task(module, task, actionName='job', hideResult=False):
+    """
+    Waits and provides updates on a vSphere task
+    """
+
+    while task.info.state == vim.TaskInfo.State.running:
+        time.sleep(2)
+
+    if task.info.state != vim.TaskInfo.State.success:
+        module.fail_json("`%s` did not complete successfully: `%s`" % (actionName, task.info.error))
+        raise task.info.error
+
+    return task.info.result
+
+def run_module():
+
+    module = AnsibleModule(
+        argument_spec=dict(
+            vc_host = dict(required=True, type='str'),
+            vc_pass = dict(required=True, no_log=True, type='str'),
+            vc_user = dict(required=True, type='str'),
+            vm_name = dict(required=True, type='str'),
+            ds_name = dict(required=False, type='str'),
+            esx_host = dict(required=False, type='str'),
+        ),
+        supports_check_mode=True,
+    )
+
+    vc_host = module.params.get('vc_host')
+    vc_pass = module.params.get('vc_pass')
+    vc_user = module.params.get('vc_user')
+    vm_name = module.params.get('vm_name')
+    ds_name = module.params.get('ds_name')
+    esx_host = module.params.get('esx_host')
+
+    result = dict(
+        changed=False,
+        original_message='',
+        message=''
+    )
+
+    if not ds_name and not esx_host:
+        module.fail_json(msg='please specify either ds_name or esx_host', **result)
+
+    try:
+        si = None
+        try:
+            si = connect.SmartConnectNoSSL(host=vc_host, port=443, user=vc_user, pwd=vc_pass)
+        except IOError, e:
+            pass
+            atexit.register(Disconnect, si)
+
+        content = si.RetrieveContent()
+
+        vm = get_obj(content, [vim.VirtualMachine], vm_name)
+
+        if vm.runtime.powerState != 'poweredOn':
+            module.fail_json(msg='VM %s is not powered on' % vm_name, **result)
+
+        vm_datastore = get_obj(content, [vim.Datastore], ds_name)
+        destination_host = get_obj(content, [vim.HostSystem], esx_host)
+
+        vm_relocate_spec = vim.vm.RelocateSpec()
+
+        if vm.datastore[0] != vm_datastore:
+            result['changed'] = True
+            result['message'] += 'moving VM %s to Datastore %s ' % (vm_name, ds_name)
+            vm_relocate_spec.datastore = vm_datastore
+
+        if vm.runtime.host != destination_host:
+            result['changed'] = True
+            result['message'] += 'moving VM %s to ESX host %s ' % (vm_name, esx_host)
+            vm_relocate_spec.host = destination_host
+
+        if module.check_mode:
+            return module.exit_json(**result)
+
+        if result['changed']:
+            task = vm.Relocate(spec=vm_relocate_spec)
+
+            # Wait for Migrate to complete
+            wait_for_task(module, task, si)
+
+    except vmodl.MethodFault, e:
+        module.fail_json(msg="Caught vmodl fault: `%s`" % str(e), **result)
+        return 1
+    except Exception, e:
+        module.fail_json(msg="Caught exception: `%s`" % str(e), **result)
+        return 1
+
+    module.exit_json(**result)
+
+def main():
+    run_module()
+
+if __name__ == '__main__':
+    main()

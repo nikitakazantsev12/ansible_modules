@@ -1,0 +1,137 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-#
+# @(#)confluence_update
+
+ANSIBLE_METADATA = {
+    'metadata_version': '0.1',
+    'status': ['preview'],
+    'supported_by': 'AMCS'
+}
+
+DOCUMENTATION = '''
+---
+module: confluence_update
+
+short_description: "Publishes a HTML file to a given (Page ID) Confluence page as a new Page version"
+
+version_added:
+
+description:
+  - "Publishes a HTML file to a given Confluence page (using Page ID) as a new Page version."
+
+options:
+  confluence_url:
+    URL of the confluence server
+  confluence_user:
+    Confluence username
+  confluence_pass:
+    Confluence password
+  pageid:
+    Page ID of the confluence page to update
+  html_file:
+    HTML file to publish
+
+author:
+  - Nikita Kazantsev
+'''
+
+EXAMPLES = '''
+- name: Upload a HTML file to a Confluence page
+  confluence_update:
+    confluence_url: https://my.confluence.edu
+    confluence_user: myadmin
+    confluence_pass: mypassword
+    pageid: 1234567
+    html_file: /tmp/mycontent.html_file
+    
+'''
+
+import sys
+import json
+import requests
+
+def get_page_ancestors(auth, pageid, confluence_url):
+    # Get basic page information plus the ancestors property
+    url = '{base}/rest/api/content/{pageid}?expand=ancestors'.format(
+        base = confluence_url,
+        pageid = pageid)
+    r = requests.get(url, auth = auth)
+    r.raise_for_status()
+    return r.json()['ancestors']
+
+def get_page_info(auth, pageid, confluence_url):
+    url = '{base}/rest/api/content/{pageid}'.format(
+        base = confluence_url,
+        pageid = pageid)
+    r = requests.get(url, auth = auth)
+    r.raise_for_status()
+    return r.json()
+
+def write_data(auth, html, pageid, title, confluence_url):
+    info = get_page_info(auth, pageid, confluence_url)
+    ver = int(info['version']['number']) + 1
+    ancestors = get_page_ancestors(auth, pageid, confluence_url)
+    anc = ancestors[-1]
+    del anc['_links']
+    del anc['_expandable']
+    del anc['extensions']
+    data = {
+        'id' : str(pageid),
+        'type' : 'page',
+        'title' : info['title'],
+        'version' : {'number' : ver},
+        'ancestors' : [anc],
+        'body'  : {
+            'storage' :
+            {
+                'representation' : 'storage',
+                'value' : str(html),
+            }
+        }
+    }
+    data = json.dumps(data)
+    url = '{base}/rest/api/content/{pageid}'.format(base = confluence_url, pageid = pageid)
+    r = requests.put(url, data = data, auth = auth, headers = { 'Content-Type' : 'application/json' })
+    r.raise_for_status()
+
+    return info['title'], ver
+
+def main():
+    module = AnsibleModule(
+        argument_spec=dict(
+            confluence_url = dict(required=True, type='str'),
+            confluence_user = dict(required=True, type='str'),
+            confluence_pass = dict(required=True, no_log=True, type='str'),
+            pageid = dict(required=True, type='str'),
+            html_file = dict(required=True, type='str'),
+        ),
+        supports_check_mode=True,
+    )
+    result = dict(
+        changed=True,
+        message=''
+    )
+
+    confluence_url = module.params['confluence_url']
+    confluence_user = module.params['confluence_user']
+    confluence_pass = module.params['confluence_pass']
+    pageid = module.params['pageid']
+    html_file = module.params['html_file']
+
+    try:
+        auth = (confluence_user, confluence_pass)
+        title = None
+        with open(html_file, 'r') as fd:
+            html = fd.read()
+        commit  = write_data(auth, html, pageid, title, confluence_url)
+    except Exception, e:
+        module.fail_json(msg=traceback.format_exc())
+
+    result['message'] = commit
+        
+    module.exit_json(**result)
+        
+from ansible.module_utils.basic import *
+
+if __name__ == "__main__" : 
+    main()
