@@ -205,7 +205,7 @@ class VmwareDrs(PyVmomi):
                     rule_mandatory=rule_obj.mandatory,
                     rule_uuid=rule_obj.ruleUuid,
                     rule_vm_group=rule_obj.vmGroupName,
-                    rule_host_group=rule_obj.affineHostGroupName,
+                    rule_host_group=rule_obj.affineHostGroupName if rule_obj.antiAffineHostGroupName == None else rule_obj.antiAffineHostGroupName,
                     rule_affinity=True if rule_obj.antiAffineHostGroupName == None else False,
                     )
 
@@ -241,7 +241,8 @@ class VmwareDrs(PyVmomi):
         rule = vim.cluster.VmHostRuleInfo()
 
         rule.vmGroupName = self.vm_group
-        rule.affineHostGroupName = self.host_group
+        rule.affineHostGroupName = self.host_group if self.affinity_rule == True else None
+        rule.antiAffineHostGroupName = self.host_group if self.affinity_rule == False else None
         rule.enabled = self.enabled
         rule.mandatory = self.mandatory
         rule.name = self.rule_name
